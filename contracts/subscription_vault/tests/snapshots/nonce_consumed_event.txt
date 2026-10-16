@@ -4,4 +4,5 @@ data:
   domain: <u32>
   nonce: <u64>
   timestamp: <u64>
-  schema_version: 2
+  schema_version: 3
+  batch_nonce: <Option<u64>>

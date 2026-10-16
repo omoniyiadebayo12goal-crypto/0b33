@@ -200,6 +200,7 @@ pub fn check_and_advance(
             domain,
             nonce: stored,
             timestamp: env.ledger().timestamp(),
+            batch_nonce: crate::admin::current_batch_nonce(env),
             schema_version: crate::types::EVENT_SCHEMA_VERSION,
         },
     );

@@ -75,6 +75,7 @@
 | 9001 | `CannotChangeUsageMode` | Subscription update | Attempting to toggle usage_enabled on an existing subscription. | Cannot toggle usage_enabled on an existing subscription; create a new one. |
 | 9101 | `SchemaMigrationDowngrade` | Schema migration | Stored schema version is newer than the binary. | Downgrade rejected; deploy the correct binary version. |
 | 9102 | `SchemaVersionMismatch` | Schema migration | Stored schema version does not match expected version. | Migration rejected; deploy compatible binary. |
+| 9103 | `SchemaMigrationVerificationFailed` | Schema migration | Post-migration storage invariants did not pass verification. | Treat as terminal; investigate migrated storage before retrying. |
 | 10001 | `DisputeNotFound` | Not found | No dispute for the given ID. | Verify dispute ID. |
 | 10002 | `DisputeAlreadyResolved` | State transition | Dispute has already been resolved. | Do not retry; inspect resolution. |
 | 10003 | `DisputeNotResponded` | State transition | Cannot resolve an unresponded dispute before window elapses. | Retry after admin responds or window elapses. |

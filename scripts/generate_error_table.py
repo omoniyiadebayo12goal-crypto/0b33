@@ -150,6 +150,7 @@ REMEDIATION: dict[str, tuple[str, str, bool]] = {
     # Schema migration
     "SchemaMigrationDowngrade":       ("Downgrade rejected; deploy the correct binary version.", "SchemaMigratedEvent", False),
     "SchemaVersionMismatch":          ("Migration rejected; deploy compatible binary.", "—", False),
+    "SchemaMigrationVerificationFailed": ("Treat as terminal; investigate migrated storage before retrying.", "—", False),
     # Dispute / Chargeback
     "DisputeNotFound":                ("Verify dispute ID before retrying.", "—", False),
     "DisputeAlreadyResolved":         ("Inspect existing resolution; do not retry.", "DisputeResolvedEvent", False),
@@ -182,6 +183,7 @@ REMEDIATION: dict[str, tuple[str, str, bool]] = {
     "ProposalAlreadyExists":          ("Cancel the active proposal with cancel_admin_proposal before proposing a different admin.", "AdminProposalCancelledEvent", False),
     "NoActiveProposal":               ("There is no active proposal to cancel; nothing to roll back.", "—", False),
     "ProposalCooldownActive":         ("Wait for the admin proposal cooldown to elapse before proposing again.", "—", False),
+        "ProposalInvalidated":            ("Submit a new proposal after the admin rotation; pre-rotation proposals cannot be reused.", "—", False),
     # Multi-sig (15000-15099)
     "MultiSigApprovalRequired":       ("This operation needs multi-sig approval; submit a proposal and gather the required signatures first.", "MultiSigProposalCreatedEvent", False),
     "MultiSigProposalNotFound":       ("No valid multi-sig proposal matches this operation; create one first.", "MultiSigProposalCreatedEvent", False),
