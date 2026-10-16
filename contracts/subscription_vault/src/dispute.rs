@@ -368,6 +368,11 @@ pub fn do_claim_cancellation_escrow(
         return Err(Error::Unauthorized);
     }
 
+    crate::subscription::extend_subscription_ttl(
+        env,
+        &DataKey::CancellationEscrow(subscription_id),
+    );
+
     let now = env.ledger().timestamp();
     if now < escrow.released_at {
         return Err(Error::EscrowNotReleased);

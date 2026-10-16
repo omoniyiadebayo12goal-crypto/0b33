@@ -55,6 +55,8 @@ mod test_datakey_layout;
 mod test_merchant_tags;
 #[cfg(test)]
 mod test_billing_period_snapshots;
+#[cfg(test)]
+mod test_governance;
 mod types;
 mod validation;
 
@@ -679,23 +681,28 @@ pub use types::{
     BatchWithdrawResult, BillingChargeKind, BillingCompactedEvent, BillingCompactionSummary,
     BillingPeriodSnapshot, BillingRetentionConfig, BillingStatement, BillingStatementAggregate,
     BillingStatementsPage, BulkSubscriptionResult, CapInfo, ChargeExecutionResult,
-    ContractSnapshot, Coupon, DataKey, DisputeEscrowLedger, EmergencyStopDisabledEvent,
+    ChargeFailureEvent, ContractSnapshot, Coupon, DataKey, DiscountAppliedEvent,
+    DisputeEscrowLedger, EmergencyStopDisabledEvent,
     EmergencyStopEnabledEvent, FullSnapshotPage, FundsDepositedEvent, GlobalCapDefaultUpdatedEvent,
-    LifetimeCapReachedEvent, LifetimeCapUpdatedEvent, MerchantBalanceEntry,
+    FeeConvertedEvent, GracePeriodEnteredEvent, LifetimeCapReachedEvent,
+    LifetimeCapUpdatedEvent, MerchantBalanceEntry,
     MerchantCapDefaultUpdatedEvent, MerchantConfig, MerchantConfigInitializedEvent,
     MerchantConfigUpdatedEvent, MerchantFeeOverrideSetEvent, MerchantPausedEvent,
     MerchantTagsUpdatedEvent, MerchantUnpausedEvent, MerchantVacation, MerchantWithdrawalEvent,
     MetadataDeletedEvent, MetadataSetEvent, MetadataSetSignedEvent, MigrationExportEvent,
-    NextChargeInfo, OneOffChargedEvent, OperatorRemovedEvent, OperatorSetEvent, OracleConfig,
+    NextChargeInfo, NonceConsumedEvent, OneOffChargedEvent, OperatorRemovedEvent,
+    OperatorSetEvent, OracleConfig,
     OracleKind, OracleLivenessEvent, OraclePrice, PartialRefundEvent, PayoutSchedule,
     PlanDeprecatedEvent, PlanRegisteredEvent, PlanTemplate, PlanTemplateUpdatedEvent,
     PrepaidQueryRequest, PrepaidQueryResult, ProtocolFeeChargedEvent, RateLimitTrippedEvent,
     ReconciliationProof, ReconciliationSummaryPage, RecoveryEvent, RecoveryReason,
     ReferralAttributedEvent, ScheduledPayoutEvent, SchemaMigratedEvent, SignedMetadataPayload,
+    SchemaMigrationSummary,
     SnapshotExportedEvent, SnapshotRestoredEvent, SplitChargeEvent, SplitPayees,
     SubAccountCreatedEvent, SubAccountWithdrawEvent, SubscriberCapReachedEvent,
     SubscriberCreateWindow, SubscriberWithdrawalEvent, Subscription, SubscriptionCancelledEvent,
-    SubscriptionChargeFailedEvent, SubscriptionChargedEvent, SubscriptionCreatedEvent,
+    SubscriptionAutoPausedEvent, SubscriptionChargeFailedEvent, SubscriptionChargedEvent,
+    SubscriptionCreatedEvent, SubscriptionExpiredEvent,
     SubscriptionMigratedEvent, SubscriptionPausedEvent, SubscriptionRecoveryReadyEvent,
     SubscriptionResumedEvent, SubscriptionStatus, SubscriptionSummary, TagAllowlistUpdatedEvent,
     TokenEarnings, TokenLiabilities, TokenReconciliationSnapshot, UsageChargeResult, UsageLimits,
@@ -891,6 +898,7 @@ impl SubscriptionVault {
         new_admin: Address,
         nonce: u64,
     ) -> Result<(), Error> {
+        require_not_emergency_stop(&env)?;
         admin::do_rotate_admin(&env, current_admin, new_admin, nonce)
     }
 
@@ -901,12 +909,14 @@ impl SubscriptionVault {
         current_admin: Address,
         new_admin: Address,
     ) -> Result<(), Error> {
+        require_not_emergency_stop(&env)?;
         admin::do_propose_admin(&env, current_admin, new_admin)
     }
 
     /// Claim a pending admin proposal. Must be called by the proposed address
     /// before the 7-day window expires.
     pub fn claim_admin_role(env: Env, claimant: Address) -> Result<(), Error> {
+        require_not_emergency_stop(&env)?;
         admin::do_claim_admin_role(&env, claimant)
     }
 
@@ -1227,9 +1237,13 @@ impl SubscriptionVault {
 
     // ── Migration / Export ────────────────────────────────────────────────────
 
-    /// Run the schema migration entry point. Admin only.
-    pub fn migrate(env: Env, admin: Address) -> Result<(), Error> {
-        admin::do_migrate(&env, admin, STORAGE_VERSION)
+    /// Preview or run the schema migration. Admin only.
+    pub fn migrate(
+        env: Env,
+        admin: Address,
+        dry_run: bool,
+    ) -> Result<SchemaMigrationSummary, Error> {
+        admin::do_migrate(&env, admin, STORAGE_VERSION, dry_run)
     }
 
     /// Migrate contract-level config from Instance to Persistent storage. Admin only.
@@ -2147,6 +2161,7 @@ impl SubscriptionVault {
                 authorizer,
                 refund_amount: sub.prepaid_balance,
                 timestamp: env.ledger().timestamp(),
+                batch_nonce: admin::current_batch_nonce(&env),
                 schema_version: crate::types::EVENT_SCHEMA_VERSION,
             },
         );
@@ -2767,6 +2782,7 @@ impl SubscriptionVault {
         amount: i128,
         evidence_hash: Option<BytesN<32>>,
     ) -> Result<u64, Error> {
+        let _guard = crate::reentrancy::ReentrancyGuard::lock(&env, "open_dispute")?;
         dispute::do_open_dispute(&env, subscriber, subscription_id, amount, evidence_hash)
     }
 
@@ -2794,6 +2810,7 @@ impl SubscriptionVault {
         dispute_id: u64,
         evidence_hash: Option<BytesN<32>>,
     ) -> Result<(), Error> {
+        let _guard = crate::reentrancy::ReentrancyGuard::lock(&env, "respond_dispute")?;
         dispute::do_respond_dispute(&env, admin, dispute_id, evidence_hash)
     }
 
@@ -2825,6 +2842,7 @@ impl SubscriptionVault {
         dispute_id: u64,
         resolve_to_subscriber: bool,
     ) -> Result<(), Error> {
+        let _guard = crate::reentrancy::ReentrancyGuard::lock(&env, "resolve_dispute")?;
         dispute::do_resolve_dispute(&env, admin, dispute_id, resolve_to_subscriber)
     }
 

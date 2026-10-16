@@ -20,21 +20,22 @@ env.events().publish(
 - Topic tuple format: `(Symbol, optional_id)` — enables filtering by event type and resource
 - Data struct: always a named type (never raw tuples) — provides stable schema for indexers
 - Data struct field order is append-only: canonical positional fields stay in place and new fields are appended
-- Every event data struct includes a trailing `schema_version: u32` field after the canonical fields
+- Every event data struct includes `schema_version: u32`; schema-v3 charge events append `batch_nonce` after it
 - Timestamp: included when useful for ordering/metrics
 - No sensitive data: all event fields are customer-visible
 - One per action: ensures deterministic batch operation ordering
 
-## Schema Versioning Policy This wave-5 update (dispute/escrow and governance/timelock events) documents events already emitted under the existing `schema_version: 2` layout — no field changes were made, so `EVENT_SCHEMA_VERSION` is not bumped by this change.
+## Schema Versioning Policy
 
-`EVENT_SCHEMA_VERSION` is currently `2`. Version `1` is the historical event payload layout
+`EVENT_SCHEMA_VERSION` is currently `3`. Version `1` is the historical event payload layout
 without an explicit schema version field. Version `2` appends `schema_version: u32` to every event
-data struct.
+data struct. Version `3` appends `batch_nonce: Option<u64>` to charge-related events and
+`NonceConsumedEvent`, after the existing schema-v2 fields.
 
 Indexers should treat the fields listed for each event below as the canonical positional prefix.
-The trailing `schema_version` field is present on every event and is intentionally not repeated in
-each individual field list. Future schema changes must be additive-only: append new fields after
-all existing canonical fields and after the current trailing schema metadata. Removing a field,
+The `schema_version` field is present on every event and is intentionally not repeated in each
+individual field list. Future schema changes must be additive-only: append new fields after
+all existing fields, including schema metadata. Removing a field,
 renaming a field, reordering a field, or changing a field type is a breaking schema change that
 requires a new migration plan rather than a silent event update.
 
@@ -87,6 +88,12 @@ Emitted when a subscriber deposits funds into a subscription vault via `deposit_
 
 ## Charging Events
 
+Charge-related events emitted during `batch_charge()` carry
+`batch_nonce: Some(nonce)`, matching the nonce consumed by that batch. This
+includes `NonceConsumedEvent`, successful and failed charge events, discount,
+fee, split, expiration, cancellation, grace-period, auto-pause, and lifetime-cap
+events. The same event types emitted outside a batch carry `batch_nonce: None`.
+
 ### SubscriptionChargedEvent
 
 **Topic:** `("charged",)` _(no subscription ID in topic)_
@@ -99,6 +106,7 @@ Emitted when an interval-based charge succeeds via `charge_subscription()` or `b
 - `merchant`: Address — merchant receiving the payment
 - `amount`: i128 — total charged amount
 - `lifetime_charged`: i128 — cumulative total charged over subscription lifetime
+- `batch_nonce`: Option<u64> — present when emitted by a batch charge
 
 **Example Use Cases:**
 
@@ -123,6 +131,7 @@ Emitted when a charge attempt fails due to insufficient balance. Subscription tr
 - `shortfall`: i128 — required_amount - available_balance
 - `resulting_status`: SubscriptionStatus — status after failure (GracePeriod or InsufficientBalance)
 - `timestamp`: u64
+- `batch_nonce`: Option<u64> — present when emitted by a batch charge
 
 **Example Use Cases:**
 
@@ -159,6 +168,7 @@ Emitted when protocol fees are extracted and routed to treasury during `charge_s
 - `fee_amount`: i128 — amount routed to treasury
 - `merchant_amount`: i128 — amount retained by merchant after fee
 - `timestamp`: u64
+- `batch_nonce`: Option<u64> — present when emitted by a batch charge
 
 ---
 
@@ -174,6 +184,7 @@ Emitted when a subscription's lifetime charge cap is exhausted. Subscription is 
 - `lifetime_cap`: i128 — configured maximum total charges
 - `lifetime_charged`: i128 — total charged at time of cap hit
 - `timestamp`: u64
+- `batch_nonce`: Option<u64> — present when emitted by a batch charge
 
 **Example Use Cases:**
 
@@ -728,7 +739,7 @@ Emitted when subscriptions are exported via `export_subscription_summaries()`.
 
 **Topic:** `("schema_migrated",)`
 
-Emitted when the contract schema is upgraded via `migrate_schema()`.
+Emitted when the contract schema is upgraded via `migrate(admin, dry_run = false)`.
 
 **Fields:**
 

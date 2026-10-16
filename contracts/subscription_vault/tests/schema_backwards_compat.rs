@@ -80,27 +80,27 @@ fn assert_schema_version(snapshot: &str) -> Result<(), SchemaCompatibilityError>
 }
 
 #[test]
-fn subscription_created_v1_fixture_is_strict_prefix_of_v2() {
+fn subscription_created_v1_fixture_is_strict_prefix_of_current_schema() {
     let v1 = fields_from_snapshot(include_str!("snapshots/subscription_created_event_v1.txt"));
-    let v2_snapshot = include_str!("snapshots/subscription_created_event.txt");
-    let v2 = fields_from_snapshot(v2_snapshot);
+    let current_snapshot = include_str!("snapshots/subscription_created_event.txt");
+    let current = fields_from_snapshot(current_snapshot);
 
-    assert_append_only(&v1, &v2).expect("v2 must preserve v1 field order");
-    assert!(v2.len() > v1.len(), "v2 must append at least one field");
-    assert_eq!(v2.last().map(String::as_str), Some("schema_version"));
-    assert_schema_version(v2_snapshot).expect("v2 fixture must carry the current version");
+    assert_append_only(&v1, &current).expect("current schema must preserve v1 field order");
+    assert!(current.len() > v1.len(), "current schema must append fields");
+    assert_eq!(current.last().map(String::as_str), Some("schema_version"));
+    assert_schema_version(current_snapshot).expect("fixture must carry the current version");
 }
 
 #[test]
-fn nonce_consumed_v1_fixture_is_strict_prefix_of_v2() {
+fn nonce_consumed_v1_fixture_is_strict_prefix_of_current_schema() {
     let v1 = fields_from_snapshot(include_str!("snapshots/nonce_consumed_event_v1.txt"));
-    let v2_snapshot = include_str!("snapshots/nonce_consumed_event.txt");
-    let v2 = fields_from_snapshot(v2_snapshot);
+    let current_snapshot = include_str!("snapshots/nonce_consumed_event.txt");
+    let current = fields_from_snapshot(current_snapshot);
 
-    assert_append_only(&v1, &v2).expect("v2 must preserve v1 field order");
-    assert!(v2.len() > v1.len(), "v2 must append at least one field");
-    assert_eq!(v2.last().map(String::as_str), Some("schema_version"));
-    assert_schema_version(v2_snapshot).expect("v2 fixture must carry the current version");
+    assert_append_only(&v1, &current).expect("current schema must preserve v1 field order");
+    assert!(current.len() > v1.len(), "current schema must append fields");
+    assert_eq!(current.last().map(String::as_str), Some("batch_nonce"));
+    assert_schema_version(current_snapshot).expect("fixture must carry the current version");
 }
 
 #[test]

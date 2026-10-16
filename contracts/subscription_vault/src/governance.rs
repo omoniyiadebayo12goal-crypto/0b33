@@ -21,6 +21,31 @@ use soroban_sdk::{Address, Env, Map, String, Symbol, Vec};
 /// Prevents immediate execution in the same ledger and ensures a minimum review window.
 const MIN_TIMELOCK_DELAY: u64 = 2 * 24 * 60 * 60; // 172800 seconds
 
+fn proposal_invalidation_cutoff_key(env: &Env) -> Symbol {
+    Symbol::new(env, "proposal_cutoff")
+}
+
+/// Invalidate every proposal submitted before the next allocated proposal ID.
+/// This is constant-cost even when the proposal history is large.
+pub fn invalidate_pending_proposals(env: &Env) {
+    let cutoff = get_current_proposal_id(env);
+    env.storage()
+        .instance()
+        .set(&proposal_invalidation_cutoff_key(env), &cutoff);
+}
+
+fn ensure_proposal_not_invalidated(env: &Env, proposal_id: u64) -> Result<(), Error> {
+    let cutoff = env
+        .storage()
+        .instance()
+        .get::<_, u64>(&proposal_invalidation_cutoff_key(env))
+        .unwrap_or(0);
+    if proposal_id < cutoff {
+        return Err(Error::ProposalInvalidated);
+    }
+    Ok(())
+}
+
 /// Add or update a guardian's voting weight.
 ///
 /// # Errors
@@ -156,6 +181,7 @@ pub fn do_vote_proposal(env: &Env, proposal_id: u64, voted_yes: bool, nonce: u64
     }
 
     let mut proposal = read_proposal(env, proposal_id)?;
+    ensure_proposal_not_invalidated(env, proposal_id)?;
 
     if proposal.executed {
         return Err(Error::InvalidInput);
@@ -218,6 +244,7 @@ pub fn do_vote_proposal(env: &Env, proposal_id: u64, voted_yes: bool, nonce: u64
 /// - `InvalidInput` if proposal already executed or quorum not met.
 pub fn do_execute_proposal(env: &Env, proposal_id: u64) -> Result<(), Error> {
     let mut proposal = read_proposal(env, proposal_id)?;
+    ensure_proposal_not_invalidated(env, proposal_id)?;
 
     if proposal.executed {
         return Err(Error::InvalidInput);
@@ -298,6 +325,7 @@ pub fn do_execute_proposal(env: &Env, proposal_id: u64) -> Result<(), Error> {
     match proposal.kind {
         ProposalKind::RotateAdmin => {
             crate::admin::write_config(env, &DataKey::Admin, &proposal.target);
+            invalidate_pending_proposals(env);
         }
         ProposalKind::SetProtocolFee => {
             crate::admin::write_config(env, &DataKey::FeeBps, &proposal.target3);
