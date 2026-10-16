@@ -8945,6 +8945,46 @@ mod storage_layout {
         }), "schema_migrated event must be emitted on upgrade");
     }
 
+    #[test]
+    fn test_migrate_verifies_rewritten_subscription_sample() {
+        let (env, client, _token, admin) = setup_test_env();
+        let (subscription_id, _, _) = create_test_subscription(
+            &env,
+            &client,
+            SubscriptionStatus::Active,
+        );
+
+        env.as_contract(&client.address, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::SchemaVersion, &3u32);
+        });
+
+        client.migrate(&admin);
+
+        let migrated = env.as_contract(&client.address, || {
+            env.storage()
+                .persistent()
+                .get::<_, Subscription>(&DataKey::Sub(subscription_id))
+                .expect("subscription must be readable after migration")
+        });
+        assert!(migrated.amount > 0);
+        assert!(migrated.interval_seconds > 0);
+        assert!(migrated.prepaid_balance >= 0);
+        assert!(migrated.lifetime_charged >= 0);
+    }
+
+    #[test]
+    fn test_migration_verification_rejects_wrong_schema_version() {
+        let (env, client, _token, _admin) = setup_test_env();
+
+        let result = env.as_contract(&client.address, || {
+            crate::admin::verify_migration(&env, crate::STORAGE_VERSION + 1)
+        });
+
+        assert_eq!(result, Err(Error::SchemaMigrationVerificationFailed));
+    }
+
     // -------------------------------------------------------------------------
     // 10. Error discriminants are stable
     //     Error codes are returned to callers and stored in BatchChargeResult.

@@ -8,6 +8,9 @@ use crate::types::{
     AcceptedToken, AdminConfigChangedEvent, AdminProposal, AdminProposalCancelledEvent,
     AdminProposalClaimedEvent, AdminProposalCreatedEvent, AdminRotatedEvent, BatchChargeResult,
     DataKey, Error, FeeTokenConfiguredEvent, PendingTreasuryChange, RecoveryEvent, RecoveryReason,
+    SchemaMigrationSummary, TreasuryChangeExecutedEvent, TreasuryChangeQueuedEvent, BATCH_MAX_SIZE,
+    TOPIC_RECOVERY, SUB_TTL_EXTEND_TO, SUB_TTL_THRESHOLD,
+    Subscription,
     TreasuryChangeExecutedEvent, TreasuryChangeQueuedEvent, BATCH_MAX_SIZE, TOPIC_RECOVERY, SUB_TTL_EXTEND_TO,
     SUB_TTL_THRESHOLD,
 };
@@ -489,6 +492,14 @@ pub(crate) struct CachedAdminConfig {
     pub auto_pause_threshold: u32,
 }
 
+const BATCH_NONCE_CONTEXT: &str = "batch_nonce_ctx";
+
+pub(crate) fn current_batch_nonce(env: &Env) -> Option<u64> {
+    env.storage()
+        .instance()
+        .get(&Symbol::new(env, BATCH_NONCE_CONTEXT))
+}
+
 /// Read all admin charge-config values from storage at once.
 /// Returns `Err` when `get_grace_period` fails (contract not initialized).
 pub(crate) fn read_cached_admin_config(env: &Env) -> Result<CachedAdminConfig, Error> {
@@ -608,9 +619,18 @@ pub fn do_batch_charge(
 
     // Nonce check must run after input validation but before any state mutation to prevent replay.
     // Domain DOMAIN_BATCH_CHARGE separates this counter from other admin ops.
-    crate::nonce::check_and_advance(env, &admin, crate::nonce::DOMAIN_BATCH_CHARGE, nonce)?;
+    let batch_nonce_key = Symbol::new(env, BATCH_NONCE_CONTEXT);
+    env.storage().instance().set(&batch_nonce_key, &nonce);
+    if let Err(error) =
+        crate::nonce::check_and_advance(env, &admin, crate::nonce::DOMAIN_BATCH_CHARGE, nonce)
+    {
+        env.storage().instance().remove(&batch_nonce_key);
+        return Err(error);
+    }
 
-    Ok(execute_batch_charge(env, subscription_ids))
+    let results = execute_batch_charge(env, subscription_ids);
+    env.storage().instance().remove(&batch_nonce_key);
+    Ok(results)
 }
 
 /// Performs a single interval-based charge. Admin only.
@@ -683,6 +703,7 @@ pub fn do_rotate_admin(
     // Atomic swap: write new admin before emitting the event so any indexer
     // that reads state on the event sees the already-updated value.
     write_config(env, &DataKey::Admin, &new_admin);
+    crate::governance::invalidate_pending_proposals(env);
 
     // Mark the multi-sig proposal as consumed
     consume_multisig_proposal(env, proposal_id)?;
@@ -1040,6 +1061,7 @@ pub fn do_claim_admin_role(env: &Env, claimant: Address) -> Result<(), Error> {
 
     storage.remove(&proposal_key(env));
     write_config(env, &DataKey::Admin, &claimant);
+    crate::governance::invalidate_pending_proposals(env);
 
     env.events().publish(
         (Symbol::new(env, "admin_proposal_claimed"),),
@@ -1139,6 +1161,79 @@ pub fn rewrite_subscriptions_for_sub_account_label(env: &Env) -> u32 {
         }
     }
     touched
+}
+
+fn count_legacy_config_keys(env: &Env) -> u32 {
+    let instance = env.storage().instance();
+    let keys = [
+        DataKey::Token,
+        DataKey::Admin,
+        DataKey::MinTopup,
+        DataKey::GracePeriod,
+        DataKey::NextId,
+        DataKey::EmergencyStop,
+        DataKey::Treasury,
+        DataKey::FeeBps,
+        DataKey::Operator,
+        DataKey::SchemaVersion,
+    ];
+    keys.iter().filter(|key| instance.has(key)).count() as u32
+}
+
+fn count_rewriteable_subscriptions(env: &Env) -> u32 {
+    let next_id: u32 = read_config(env, &DataKey::NextId).unwrap_or(0);
+    let mut count = 0u32;
+    for id in 0..next_id {
+        if env
+            .storage()
+            .persistent()
+            .get::<_, crate::types::Subscription>(&DataKey::Sub(id))
+            .is_some()
+        {
+            count = count.saturating_add(1);
+        }
+    }
+    count
+}
+
+fn plan_schema_migration(
+    env: &Env,
+    stored_version: u32,
+    binary_version: u32,
+    dry_run: bool,
+) -> SchemaMigrationSummary {
+    let needs_config_migration = stored_version <= 2 && binary_version >= 3;
+    let needs_ledger_expiration_rewrite = stored_version <= 3 && binary_version >= 4;
+    let needs_sub_account_label_rewrite = stored_version <= 4 && binary_version >= 5;
+    let subscription_count = if dry_run
+        && (needs_ledger_expiration_rewrite || needs_sub_account_label_rewrite)
+    {
+        count_rewriteable_subscriptions(env)
+    } else {
+        0
+    };
+
+    SchemaMigrationSummary {
+        from_version: stored_version,
+        to_version: binary_version,
+        config_keys_to_migrate: if needs_config_migration {
+            count_legacy_config_keys(env)
+        } else {
+            0
+        },
+        subscriptions_for_ledger_expiration: if needs_ledger_expiration_rewrite {
+            subscription_count
+        } else {
+            0
+        },
+        subscriptions_for_sub_account_label: if needs_sub_account_label_rewrite {
+            subscription_count
+        } else {
+            0
+        },
+        dry_run,
+        would_change: stored_version != binary_version,
+    }
 }
 
 pub fn do_migrate_config_to_persistent_internal(env: &Env) -> Result<(), Error> {
@@ -1254,6 +1349,7 @@ pub fn migrate_config_to_persistent(env: &Env, admin: Address) -> Result<(), Err
     }
 
     do_migrate_config_to_persistent_internal(env)?;
+    verify_migration(env, 3)?;
 
     env.events().publish(
         (Symbol::new(env, "schema_migrated"),),
@@ -1269,12 +1365,70 @@ pub fn migrate_config_to_persistent(env: &Env, admin: Address) -> Result<(), Err
     Ok(())
 }
 
+fn verify_migration(env: &Env, expected_version: u32) -> Result<(), Error> {
+    let storage = env.storage();
+    let schema_is_persistent = storage
+        .persistent()
+        .get::<_, u32>(&DataKey::SchemaVersion)
+        == Some(expected_version);
+    let schema_is_instance = storage
+        .instance()
+        .get::<_, u32>(&DataKey::SchemaVersion)
+        == Some(expected_version);
+
+    if get_schema_version(env) != expected_version
+        || (expected_version >= 3 && (!schema_is_persistent || schema_is_instance))
+        || (expected_version < 3 && (!schema_is_instance || schema_is_persistent))
+    {
+        return Err(Error::SchemaMigrationVerificationFailed);
+    }
+
+    if expected_version >= 3 {
+        for key in [
+            DataKey::Token,
+            DataKey::Admin,
+            DataKey::MinTopup,
+            DataKey::GracePeriod,
+            DataKey::NextId,
+            DataKey::EmergencyStop,
+            DataKey::Treasury,
+            DataKey::FeeBps,
+            DataKey::Operator,
+        ] {
+            if storage.instance().has(&key) {
+                return Err(Error::SchemaMigrationVerificationFailed);
+            }
+        }
+
+        let next_id: u32 = read_config(env, &DataKey::NextId).unwrap_or(0);
+        if next_id > 0 {
+            for id in [0, next_id / 2, next_id - 1] {
+                if let Some(sub) = storage
+                    .persistent()
+                    .get::<_, Subscription>(&DataKey::Sub(id))
+                {
+                    if sub.amount <= 0
+                        || sub.interval_seconds == 0
+                        || sub.prepaid_balance < 0
+                        || sub.lifetime_charged < 0
+                    {
+                        return Err(Error::SchemaMigrationVerificationFailed);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Execute a schema migration from the stored version to `STORAGE_VERSION`.
 pub fn do_migrate(
     env: &Env,
     admin: Address,
     binary_version: u32,
-) -> Result<(), crate::types::Error> {
+    dry_run: bool,
+) -> Result<SchemaMigrationSummary, crate::types::Error> {
     require_admin_auth(env, &admin)?;
 
     let stored_version = get_schema_version(env);
@@ -1283,8 +1437,14 @@ pub fn do_migrate(
         return Err(crate::types::Error::SchemaVersionMismatch);
     }
 
+    let mut summary = plan_schema_migration(env, stored_version, binary_version, dry_run);
+
+    if dry_run {
+        return Ok(summary);
+    }
+
     if stored_version == binary_version {
-        return Ok(());
+        return Ok(summary);
     }
 
     let mut current = stored_version;
@@ -1304,14 +1464,16 @@ pub fn do_migrate(
             // would otherwise fail to deserialize and every `get_subscription`
             // call would panic after the binary upgrade.
             (3, _) => {
-                rewrite_subscriptions_for_ledger_expiration(env);
+                summary.subscriptions_for_ledger_expiration =
+                    rewrite_subscriptions_for_ledger_expiration(env);
                 current = 4;
             }
             // v4 → v5: rewrite every `DataKey::Sub(id)` record so the new
             // `sub_account_label: Option<Symbol>` field deserializes cleanly
             // for subscriptions created before STORAGE_VERSION 5.
             (4, _) => {
-                rewrite_subscriptions_for_sub_account_label(env);
+                summary.subscriptions_for_sub_account_label =
+                    rewrite_subscriptions_for_sub_account_label(env);
                 current = 5;
             }
             _ => {
@@ -1339,6 +1501,8 @@ pub fn do_migrate(
             .set(&crate::types::DataKey::SchemaVersion, &binary_version);
     }
 
+    verify_migration(env, binary_version)?;
+
     env.events().publish(
         (soroban_sdk::Symbol::new(env, "schema_migrated"),),
         crate::types::SchemaMigratedEvent {
@@ -1350,5 +1514,5 @@ pub fn do_migrate(
         },
     );
 
-    Ok(())
+    Ok(summary)
 }

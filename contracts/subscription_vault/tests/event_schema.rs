@@ -3,8 +3,8 @@
 extern crate alloc;
 
 use soroban_sdk::{
-    testutils::{Address as _, Events},
-    Address, Env, FromVal,
+    testutils::{Address as _, Events, Ledger as _},
+    Address, Env, FromVal, Symbol,
 };
 use subscription_vault::{
     AdminRotatedEvent, SubscriptionCreatedEvent, SubscriptionVault, SubscriptionVaultClient,
@@ -14,6 +14,95 @@ use subscription_vault::{
     GracePeriodEnteredEvent, SubscriptionResumedEvent, EmergencyStopEnabledEvent,
     EmergencyStopDisabledEvent, AdminProposalCreatedEvent, ReferralAttributedEvent,
 };
+
+#[test]
+fn test_batch_charge_events_include_nonce_and_standalone_events_do_not() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let initial_timestamp = 1_000_000;
+    env.ledger().set_timestamp(initial_timestamp);
+
+    let token_admin = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+    let admin = Address::generate(&env);
+    let subscriber = Address::generate(&env);
+    let merchant = Address::generate(&env);
+    let contract_id = env.register(SubscriptionVault, ());
+    let client = SubscriptionVaultClient::new(&env, &contract_id);
+    client.init(&token, &6, &admin, &1_000_000i128, &3600u64);
+
+    let token_client = soroban_sdk::token::StellarAssetClient::new(&env, &token);
+    token_client.mint(&subscriber, &2_000_000i128);
+    let subscription_id = client.create_subscription(
+        &subscriber,
+        &merchant,
+        &1_000_000i128,
+        &3600u64,
+        &true,
+        &None,
+        &None::<u64>,
+        &None::<u32>,
+    );
+    client.deposit_funds(
+        &subscription_id,
+        &2_000_000i128,
+        &None::<soroban_sdk::BytesN<32>>,
+    );
+
+    let mut ids = soroban_sdk::Vec::new(&env);
+    ids.push_back(subscription_id);
+    env.ledger().set_timestamp(initial_timestamp + 3600);
+    client.batch_charge(&ids, &0u64);
+
+    let events = env.events().all();
+    let mut charged = None;
+    let mut consumed_nonce = None;
+    for (_, topics, data) in events.iter() {
+        let Some(first_topic) = topics.get(0) else {
+            continue;
+        };
+        let first_topic = Symbol::from_val(&env, &first_topic);
+        if first_topic == Symbol::new(&env, "charged") {
+            let event: SubscriptionChargedEvent = FromVal::from_val(&env, &data);
+            charged = Some(event);
+        } else if first_topic == Symbol::new(&env, "nonce_consumed") {
+            let event: NonceConsumedEvent = FromVal::from_val(&env, &data);
+            consumed_nonce = Some(event);
+        }
+    }
+
+    assert_eq!(charged.expect("batch must emit charge event").batch_nonce, Some(0));
+    assert_eq!(
+        consumed_nonce
+            .expect("batch must emit nonce event")
+            .batch_nonce,
+        Some(0)
+    );
+
+    env.ledger().set_timestamp(initial_timestamp + 7200);
+    client.charge_subscription(
+        &subscription_id,
+        &None::<soroban_sdk::BytesN<32>>,
+    );
+    let events = env.events().all();
+    let mut standalone_charged = None;
+    for (_, topics, data) in events.iter() {
+        if let Some(first_topic) = topics.get(0) {
+            if Symbol::from_val(&env, &first_topic) == Symbol::new(&env, "charged") {
+                let event: SubscriptionChargedEvent = FromVal::from_val(&env, &data);
+                standalone_charged = Some(event);
+            }
+        }
+    }
+    assert_eq!(
+        standalone_charged
+            .expect("standalone call must emit charge event")
+            .batch_nonce,
+        None
+    );
+}
 
 #[test]
 fn test_nonce_consumed_and_admin_rotated_events_emitted() {

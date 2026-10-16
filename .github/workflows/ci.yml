@@ -10,6 +10,18 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  admin-authorization-matrix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4.2.2
+      - name: Set up Python
+        uses: actions/setup-python@v5.0.0
+        with:
+          python-version: '3.12'
+      - name: Validate admin authorization matrix
+        run: python scripts/check_admin_authorization_matrix.py
+        working-directory: ${{ github.workspace }}
+
   error-table-validation:
     runs-on: ubuntu-latest
     steps:

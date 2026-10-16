@@ -387,6 +387,7 @@ pub fn apply_discount_at_charge(
                     discounted_amount: payable,
                     coupon_code: coupon.code,
                     timestamp: now,
+                    batch_nonce: crate::admin::current_batch_nonce(env),
                     schema_version: EVENT_SCHEMA_VERSION,
                 },
             );
